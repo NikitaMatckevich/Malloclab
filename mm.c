@@ -53,66 +53,21 @@ team_t team = {
 // returns the address that lies in len bytes before or after ptr
 #define OFFSET(ptr, len) (void*)((char*)(ptr) + (len))
 
-enum { IMPLICIT, EXPLICIT, SEGREGATED} heap_type;
 enum { FIRST_FIT, NEXT_FIT, BEST_FIT } search_policy;
 size_t  nb_components;
 size_t* sizes;
 void**  linked_components;
-
 void* blocks;
 
 void mm_check(void);
 
-// finder for implicit lists
-// len = 2*SIZE_T_SIZE + size of payload
-static void* imp_find_block(size_t len)
-{
-  static void* res = NULL;
-  void* end = mem_heap_hi();
-  size_t s;
-
-  switch (search_policy) {
-  
-  case FIRST_FIT: ;
-
-    res = blocks;
-    while (s = *(size_t*)res, (res < end) && ((s & 1) || (s < len))) {
-      res = OFFSET(res, (s & -2));
-    }
-    if (res >= end) {
-      res = NULL;
-    }
-    break;
-
-  case BEST_FIT: ;
-
-    size_t dist = mem_heapsize();
-   
-    res = NULL;
-
-    for (void* p = blocks; p < end; p = OFFSET(p, (s & -2))) {
-      s = *(size_t*)p;
-      if (!(s & 1) && (s >= len) && (dist > s - len)) {
-          res = p;
-          dist = s - len;
-      }
-    }
-    break;
-  
-  default:
-    printf("unexpected seacrh policy\n");
-    exit(8);
-  }
-
-  return res;
-}
-
 // finder for explicit lists
 // len = 2*SIZE_T_SIZE + max(size of payload, 2*PTR_T_SIZE)
-static void* exp_find_block(size_t len)
+static void* find_block(size_t len)
 {
-  static void* res;
-  
+  static void* res = NULL;
+  size_t s;
+
   size_t i = 0;
   while (i < nb_components - 1 && len > sizes[i]) {
     ++i;
@@ -124,7 +79,6 @@ static void* exp_find_block(size_t len)
     
     case FIRST_FIT: ;
       res = linked_components[i];
-      size_t s;
       while ((res != NULL) &&
             (s = *(size_t*)OFFSET(res, -PTR_T_SIZE - SIZE_T_SIZE),
             ((s & 1) || (s < len))))
@@ -137,16 +91,16 @@ static void* exp_find_block(size_t len)
       break;
 
     case BEST_FIT: ;
+      res = NULL;
       void* p = linked_components[i];
       size_t dist = mem_heapsize();
-
-      for (size_t s = *(size_t*)OFFSET(p, -PTR_T_SIZE - SIZE_T_SIZE);
-           (p != NULL); p = *(void**)p)
-      {
-        if (!(s & 1) && (s >= len) && (dist > s - len)) {
+      while (p != NULL) {
+        s = *(size_t*)OFFSET(p, -SIZE_T_SIZE - PTR_T_SIZE);
+        if (((s & 1) == FREE) && (s >= len) && (dist > s - len)) {
           res = p;
-          dist = s- len;
+          dist = s - len;
         }
+        p = *(void**)p;
       }
       if (res != NULL) {
         return OFFSET(res, -PTR_T_SIZE - SIZE_T_SIZE);
@@ -229,9 +183,7 @@ static void free_block(void** p) {
     if ((*next & 1) == FREE) {
       bsize += *next;
       bend = (size_t*)OFFSET((void*)bend, *next);
-      if (heap_type == EXPLICIT) {
-        delete_from_queue((void*)next);
-      }
+      delete_from_queue((void*)next);
     }
   }
 
@@ -240,31 +192,24 @@ static void free_block(void** p) {
     if ((*prev & 1) == FREE) {
       bsize += *prev;
       bbeg = (size_t*)OFFSET((void*)bbeg, -(*prev));
-      if (heap_type == EXPLICIT) {
-        delete_from_queue((void*)bbeg);
-      }
+      delete_from_queue((void*)bbeg);
     }
   }
   
   *bbeg = bsize;
   *bend = bsize;
 
-  if (heap_type == EXPLICIT) {
-    add_to_queue((void*)bbeg);
-  }
+  add_to_queue((void*)bbeg);
 
   *p = bbeg;
 }
 
 // occupy the block in the heap, called by malloc
-static void add_block(void* p, size_t len) {
+static void occupy_block(void* p, size_t len) {
  
-  if (heap_type == EXPLICIT) {
-    delete_from_queue(p);
-  }
-  
+    
   size_t pload_threshold = 2*SIZE_T_SIZE;
-  pload_threshold += ((heap_type == IMPLICIT) || (SIZE_T_SIZE > 2*PTR_T_SIZE)) ?
+  pload_threshold += (SIZE_T_SIZE > 2*PTR_T_SIZE) ?
     SIZE_T_SIZE : 2*PTR_T_SIZE;
   
   size_t* bbeg = (size_t*)p;
@@ -284,9 +229,7 @@ static void add_block(void* p, size_t len) {
     size_t* resid_end = (size_t*)OFFSET(p, old_size - SIZE_T_SIZE);
     *resid_beg = resid_len;
     *resid_end = resid_len;
-    if (heap_type == EXPLICIT) {
-      add_to_queue((void*)resid_beg);
-    }
+    add_to_queue((void*)resid_beg);
   }
 }
 
@@ -318,7 +261,7 @@ static void* adjust_heap(size_t size)
 }
 
 // print LIFO queues of free blocks
-static void print_linked_components(void) {
+/*static void print_linked_components(void) {
   for (size_t i = 0; i < nb_components; ++i) {
     void* curr;
     void* prev;
@@ -348,31 +291,8 @@ static void print_linked_components(void) {
       curr = *(void**)curr;
     }
   }
-}
-/*
-static void backup(void) {
-  for (int e = 15; e >= 0; e--) {
-    switch (codes[e].code) {
-    case 1: free_block(&codes[e].address); break;
-    case 2: add_block(codes[e].address, codes[e].size); break;
-    case 3: printf("OOO i'm nor prepared for that!\n"); break;
-    default: break;
-    }
-  }
-}
+}*/
 
-static void repeat(void) {
-  for (int e = 0; e <= 15; e++) {
-    switch (codes[e].code) {
-    case 1: add_block(codes[e].address, codes[e].size); break;
-    case 2: free_block(&codes[e].address); break;
-    case 3: printf("OOO i'm nor prepared for that!\n"); break;
-    default: break;
-    }
-    print_linked_components();
-  }
-}
-*/
 static int check_bounds(void* p, int status)
 {
   size_t* bbeg = (size_t*)p;
@@ -502,49 +422,44 @@ static void check_implicit_heap(void)
 void mm_check()
 {
   check_implicit_heap();
-  if (heap_type == EXPLICIT) {
-    check_free_lists();
-  }
+  check_free_lists();
 }
 
 /* mm_init - initialize the malloc package. */
 int mm_init(void)
 {
-  const size_t nb_pages = 64;
+  const size_t nb_pages = 1;
   size_t mps = mem_pagesize();
 
   if (mem_heapsize() == 0) {
-    if (mem_sbrk(mps) == NULL) {
+    if (mem_sbrk(nb_pages*mps) == NULL) {
       printf("sbrk cannot adjust heap, initialization failed\n");
       exit(8);
     }
   }
-  size_t* lo_heap = (size_t*)mem_heap_lo();
-  size_t* hi_heap = (size_t*)OFFSET(mem_heap_hi(), -SIZE_T_SIZE + 1);
-  *lo_heap = mem_heapsize();
-  *hi_heap = mem_heapsize();
- 
-  blocks = (void*)lo_heap;
- 
-  heap_type = IMPLICIT;
-  search_policy = FIRST_FIT;
+  void* lo_heap = mem_heap_lo();
+  void* hi_heap = OFFSET(mem_heap_hi(), -SIZE_T_SIZE + 1);
 
   nb_components = 3;
-  sizes = (size_t*)mm_malloc((nb_components-1)*sizeof(size_t));
-  linked_components = (void**)mm_malloc(nb_components*sizeof(void*));
- 
-  blocks = mm_malloc(nb_pages*mps);
-  blocks = OFFSET(blocks, -SIZE_T_SIZE);
-
-  for (size_t i = 0; i < nb_components - 1; ++i) {
+  size_t offset_sizes = (nb_components-1) * sizeof(size_t);
+  size_t offset_comps = nb_components * sizeof(void*);
+  
+  sizes = (size_t*)lo_heap;
+  linked_components = (void**)OFFSET(lo_heap, offset_sizes);
+    for (size_t i = 0; i < nb_components - 1; ++i) {
     sizes[i] = (2 + i)*mps/2;
     linked_components[i] = NULL;
   }
   linked_components[nb_components-1] = NULL;
 
-  heap_type = EXPLICIT;
+  size_t offset = ALIGN(offset_sizes + offset_comps); 
+  blocks = OFFSET(lo_heap, offset);
+  *(size_t*)blocks  = mem_heapsize() - offset;
+  *(size_t*)hi_heap = mem_heapsize() - offset;
 
-  free_block(&blocks);
+  add_to_queue(blocks);
+  search_policy = BEST_FIT;
+
   return 0;
 }
 
@@ -552,25 +467,21 @@ int mm_init(void)
  * mm_malloc - Allocate a block by incrementing the brk pointer.
  *     Always allocate a block whose size is a multiple of the alignment.
  */
-void *mm_malloc(size_t size)
+void* mm_malloc(size_t size)
 {
   size_t new_size;
   void* p;
 
-  if (heap_type == IMPLICIT) {
-    new_size = ALIGN(size + 2*SIZE_T_SIZE);
-    p = imp_find_block(new_size);
-  } else {
-    new_size = (size > 2*PTR_T_SIZE) ? size : 2*PTR_T_SIZE;
-    new_size = ALIGN(new_size + 2*SIZE_T_SIZE);
-    p = exp_find_block(new_size);
-  }
+  new_size = (size > 2*PTR_T_SIZE) ? size : 2*PTR_T_SIZE;
+  new_size = ALIGN(new_size + 2*SIZE_T_SIZE);
+  p = find_block(new_size);
   
   if (p == NULL) {
     p = adjust_heap(new_size);
   }
  
-  add_block(p, new_size);
+  delete_from_queue(p);
+  occupy_block(p, new_size);
   
   return OFFSET(p, SIZE_T_SIZE);
 }
@@ -593,71 +504,71 @@ void mm_free(void *p)
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
  */
-void *mm_realloc(void *ptr, size_t size)
-{/*
-  void* newptr;
-
-  if (ptr == NULL) {
-    return mm_malloc(size);
-  } else {
-    if (size == 0) {
-      mm_free(ptr);
-      return ptr;
-    } else {
+void* mm_realloc(void *ptr, size_t size)
+{
+  if ((ptr != NULL) && (size > 0)) {
   
-      size_t* bbeg = (size_t*)OFFSET(ptr, -SIZE_T_SIZE);
-      size_t oldsize = *bbeg & -2;
-      size_t newsize = (size > 2*PTR_T_SIZE) ? size : 2*PTR_T_SIZE;
-      newsize = ALIGN(newsize + 2*SIZE_T_SIZE);
+    size_t* bbeg = (size_t*)OFFSET(ptr, -SIZE_T_SIZE);
+    size_t oldsize = *bbeg & -2;
+    size_t newsize = (size > 2*PTR_T_SIZE) ? size : 2*PTR_T_SIZE;
+    newsize = ALIGN(newsize + 2*SIZE_T_SIZE);
 
-      size_t adjusted = oldsize;
-      size_t* resid_beg = (size_t*)OFFSET(bbeg, oldsize);
-      if ((*resid_beg & 1) == FREE) {
-        adjusted += *resid_beg;
-        if (adjusted >= newsize) {
-          delete_from_queue((void*)resid_beg);
-        }
-      }
-
-      if (adjusted >= newsize) {
-
-        size_t* bend = (size_t*)OFFSET(bbeg, newsize - SIZE_T_SIZE);
-        *bbeg = newsize | 1;
-        *bend = newsize | 1;
-
-        size_t pload_threshold = 2*SIZE_T_SIZE;
-        pload_threshold += ((heap_type == IMPLICIT) || (SIZE_T_SIZE > 2*PTR_T_SIZE)) ?
-          SIZE_T_SIZE : 2*PTR_T_SIZE;
-
-        if (adjusted - newsize >= pload_threshold) {
-        
-          size_t resid_len = oldsize - newsize;
-          size_t* resid_beg = (size_t*)OFFSET(bbeg, newsize);
-          size_t* resid_end = (size_t*)OFFSET(bbeg, adjusted - SIZE_T_SIZE);
-          *resid_beg = resid_len;
-          *resid_end = resid_len;
-          add_to_queue((void*)resid_beg);
-        }
-
-        return ptr;
-
-      } else {
- 
-        void* newptr = mm_malloc(size);
-        if (newptr == NULL)
-          return NULL;
-
-        if (size < oldsize)
-          oldsize = size;
-
-        memcpy(newptr, ptr, oldsize);
-        mm_free(ptr);
-  
-        return newptr;
-      }
+    void* resid_beg = OFFSET(bbeg, oldsize);
+    size_t adjusted = 0;
+    if ((resid_beg <= mem_heap_hi()) && ((*(size_t*)resid_beg & 1) == FREE))
+    {
+      adjusted = *(size_t*)resid_beg;
     }
-  }*/
- 
+
+    if (oldsize + adjusted >= newsize) {
+
+      oldsize += adjusted;
+      if (adjusted > 0) {
+        delete_from_queue(resid_beg);
+      }
+
+      size_t pload_threshold = 2*SIZE_T_SIZE;
+      pload_threshold += (SIZE_T_SIZE > 2*PTR_T_SIZE) ?
+        SIZE_T_SIZE : 2*PTR_T_SIZE;
+
+      if (oldsize - newsize < pload_threshold) {
+        newsize = oldsize;
+      }
+
+      size_t* bend = (size_t*)OFFSET(bbeg, newsize - SIZE_T_SIZE);
+      *bbeg = newsize | 1;
+      *bend = newsize | 1;
+
+      if (oldsize - newsize >= pload_threshold) {
+        size_t resid_len = oldsize - newsize;
+        size_t* resid_beg = (size_t*)OFFSET(bbeg, newsize);
+        size_t* resid_end = (size_t*)OFFSET(bbeg, oldsize - SIZE_T_SIZE);
+        *resid_beg = resid_len;
+        *resid_end = resid_len;
+        add_to_queue((void*)resid_beg);
+      }
+      return ptr;
+
+    } else {
+      void* newptr = mm_malloc(size);
+      if (size < oldsize) {
+        oldsize = size;
+      }
+      memcpy(newptr, ptr, oldsize);
+      mm_free(ptr);
+      return newptr;
+    }
+  }
+
+  if (ptr == NULL)
+    return mm_malloc(size);
+
+  if (size == 0)
+    mm_free(ptr);
+
+  return NULL;
+
+ /*
   void *oldptr = ptr;
   void *newptr;
   size_t copy_size;
@@ -673,5 +584,5 @@ void *mm_realloc(void *ptr, size_t size)
   memcpy(newptr, oldptr, copy_size);
   mm_free(oldptr);
   
-  return newptr;
+  return newptr;*/
 }
