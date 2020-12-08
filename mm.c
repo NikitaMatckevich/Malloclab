@@ -37,15 +37,13 @@ team_t team = {
 
 /* single word (4) or double word (8) alignment */
 #define ALIGNMENT 8
-
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
 
-#define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
-#define PTR_T_SIZE (ALIGN(sizeof(void*)))
+#define SIZE_T_SIZE  (sizeof(size_t))
+#define PTR_T_SIZE   (sizeof(void*))
 
 // block types
-
 #define FREE 0
 #define OCCUPIED 1
 #define NO_MATTER 2
@@ -53,70 +51,12 @@ team_t team = {
 // returns the address that lies in len bytes before or after ptr
 #define OFFSET(ptr, len) (void*)((char*)(ptr) + (len))
 
-enum { FIRST_FIT, NEXT_FIT, BEST_FIT } search_policy;
 size_t  nb_components;
-size_t* sizes;
+size_t* min_block_sizes;
 void**  linked_components;
-void* blocks;
+void*   blocks;
 
 void mm_check(void);
-
-// finder for explicit lists
-// len = 2*SIZE_T_SIZE + max(size of payload, 2*PTR_T_SIZE)
-static void* find_block(size_t len)
-{
-  static void* res = NULL;
-  size_t s;
-
-  size_t i = 0;
-  while (i < nb_components - 1 && len > sizes[i]) {
-    ++i;
-  }
-
-  while (i < nb_components) {
-
-    switch (search_policy) {
-    
-    case FIRST_FIT: ;
-      res = linked_components[i];
-      while ((res != NULL) &&
-            (s = *(size_t*)OFFSET(res, -PTR_T_SIZE - SIZE_T_SIZE),
-            ((s & 1) || (s < len))))
-      {
-        res = *(void**)res;
-      }
-      if (res != NULL) {
-        return OFFSET(res, -PTR_T_SIZE - SIZE_T_SIZE);
-      }
-      break;
-
-    case BEST_FIT: ;
-      res = NULL;
-      void* p = linked_components[i];
-      size_t dist = mem_heapsize();
-      while (p != NULL) {
-        s = *(size_t*)OFFSET(p, -SIZE_T_SIZE - PTR_T_SIZE);
-        if (((s & 1) == FREE) && (s >= len) && (dist > s - len)) {
-          res = p;
-          dist = s - len;
-        }
-        p = *(void**)p;
-      }
-      if (res != NULL) {
-        return OFFSET(res, -PTR_T_SIZE - SIZE_T_SIZE);
-      }
-      break;
-  
-    default:
-      printf("unexpected seacrh policy\n");
-      exit(8);
-    }
-
-    i++;
-  }
-
-  return NULL;
-}
 
 // delete element from free block queue, p is a pointer to the very beginning
 // of the block
@@ -127,7 +67,7 @@ static void delete_from_queue(void* p) {
   
   size_t i = 0;
   size_t len = *(size_t*)p;
-  while (i < nb_components-1 && len > sizes[i]) {
+  while (i < nb_components-1 && len > min_block_sizes[i]) {
     ++i;
   }
 
@@ -153,10 +93,10 @@ static void add_to_queue(void* p) {
   void** to_next = (void**)OFFSET((void*)to_prev, PTR_T_SIZE);
   
   size_t i = 0;
-  while (i < nb_components-1 && len > sizes[i]) {
+  while (i < nb_components-1 && len > min_block_sizes[i]) {
     ++i;
   }
-   
+
   *to_prev = NULL;
   *to_next = linked_components[i];
   linked_components[i] = (void*)to_next;
@@ -165,6 +105,40 @@ static void add_to_queue(void* p) {
     void** prev_of_next = (void**)OFFSET(*to_next, -PTR_T_SIZE);
     *prev_of_next = (void*)to_prev;
   }
+}
+
+// finder for explicit lists
+// len = 2*SIZE_T_SIZE + max(size of payload, 2*PTR_T_SIZE)
+static void* find_block(size_t len)
+{
+  void* res = NULL;
+  size_t i = 0;
+  while (i < nb_components - 1 && len > min_block_sizes[i]) {
+    ++i;
+  }
+
+  while (i < nb_components && res == NULL) {
+
+    void* p = linked_components[i];
+    size_t dist = mem_heapsize();
+    while (p != NULL) {
+      size_t s = *(size_t*)OFFSET(p, -SIZE_T_SIZE - PTR_T_SIZE);
+      if (((s & 1) == FREE) && (s >= len) && (dist > s - len)) {
+        res = p;
+        dist = s - len;
+        if (dist == 0)
+          break;
+      }
+      p = *(void**)p;
+    }
+    i++;
+  }
+
+  if (res != NULL) {
+    res = OFFSET(res, -SIZE_T_SIZE - PTR_T_SIZE);
+  }
+
+  return res;
 }
 
 // free block pointed by *p, change the *p value in case of coalescing
@@ -198,19 +172,14 @@ static void free_block(void** p) {
   
   *bbeg = bsize;
   *bend = bsize;
-
-  add_to_queue((void*)bbeg);
-
-  *p = bbeg;
+  
+  *p = (void*)bbeg;
 }
 
 // occupy the block in the heap, called by malloc
 static void occupy_block(void* p, size_t len) {
- 
-    
-  size_t pload_threshold = 2*SIZE_T_SIZE;
-  pload_threshold += (SIZE_T_SIZE > 2*PTR_T_SIZE) ?
-    SIZE_T_SIZE : 2*PTR_T_SIZE;
+     
+  size_t pload_threshold = 2*(SIZE_T_SIZE + PTR_T_SIZE);
   
   size_t* bbeg = (size_t*)p;
   size_t old_size = *bbeg;
@@ -261,37 +230,33 @@ static void* adjust_heap(size_t size)
 }
 
 // print LIFO queues of free blocks
-/*static void print_linked_components(void) {
+static void print_linked_components(void) {
   for (size_t i = 0; i < nb_components; ++i) {
     void* curr;
     void* prev;
 
     curr = linked_components[i];
     prev = NULL;
-    printf("[list %i] forward:\n", i);
+    printf("[list %i]\n", i);
+    printf("\tforward:\n");
     while (curr != NULL) {
-      printf("\tcurrent block : %p\n", curr);
-      printf("\tnext block    : %p\n", *(void**)curr);
       prev = curr;
       curr = *(void**)curr;
-      if (prev == curr) {
-        char ch;
-        scanf("%c", &ch);
-      }
+      printf("\t\t%p --> %p\n", prev, curr);
     }
 
     if (prev != NULL) {
       curr = OFFSET(prev, -PTR_T_SIZE);
       prev = NULL;
     }
+    printf("\tbackward:\n");
     while (curr != NULL) {
-      printf("\tcurrent block  : %p\n", curr);
-      printf("\tprevious block : %p\n", *(void**)curr);
       prev = curr;
       curr = *(void**)curr;
+      printf("\t\t%p --> %p\n", prev, curr);
     }
   }
-}*/
+}
 
 static int check_bounds(void* p, int status)
 {
@@ -338,13 +303,14 @@ static int check_valid_address(void* p)
 }
 
 static int check_block_size(size_t i, size_t len) {
-  if ((i != nb_components-1 && len > sizes[i]) || (i != 0 && len < sizes[i-1])) {
+  if ((i != nb_components-1 && len > min_block_sizes[i]) ||
+      (i != 0 && len < min_block_sizes[i-1])) {
     printf("block is not in the right list\n");
     printf("\treal block size = %d\n", len);
     size_t pload_threshold = 2*SIZE_T_SIZE;
     pload_threshold += (SIZE_T_SIZE > 2*PTR_T_SIZE)? SIZE_T_SIZE : 2*PTR_T_SIZE;
-    size_t min = (i == 0) ? pload_threshold : sizes[i-1];
-    size_t max = (i == nb_components-1) ? (unsigned int)(-1) : sizes[i];
+    size_t min = (i == 0) ? pload_threshold : min_block_sizes[i-1];
+    size_t max = (i == nb_components-1) ? (unsigned int)(-1) : min_block_sizes[i];
     printf("\texpected size range = [%d, %d]\n", min, max);
     return 0;
   }
@@ -353,6 +319,7 @@ static int check_block_size(size_t i, size_t len) {
 
 static void* forward_iterations(void* s, size_t i) {
   void* prev = NULL;
+
   for (void* curr = s; curr != NULL; curr = *(void**)curr) {
     
     void* bbeg = OFFSET(curr, -PTR_T_SIZE - SIZE_T_SIZE);
@@ -362,7 +329,7 @@ static void* forward_iterations(void* s, size_t i) {
     
     void** to_prev = (void**)OFFSET(curr, -PTR_T_SIZE);
     if (prev != *to_prev) {
-      printf("free block doesn't point to previous block in list\n");
+      printf("free block doesn't point to previous block in list %d\n", i);
       return NULL;
     }
      
@@ -391,6 +358,17 @@ static void* backward_iterations(void* s) {
   return next;
 }
 
+static void check_implicit_heap(void)
+{
+  for (void* p = blocks; p < mem_heap_hi(); p = OFFSET(p, (*(size_t*)p & -2)))
+  {
+    if (!(check_valid_address(p) && check_bounds(p, NO_MATTER))) {
+      printf("address = %p\n", p);
+      exit(8);
+    }
+  }
+}
+
 static int check_free_lists(void)
 { 
   for (size_t i = 0; i < nb_components; ++i) {
@@ -408,17 +386,6 @@ static int check_free_lists(void)
   return 1;
 }
 
-static void check_implicit_heap(void)
-{
-  for (void* p = blocks; p < mem_heap_hi(); p = OFFSET(p, (*(size_t*)p & -2)))
-  {
-    if (!(check_valid_address(p) && check_bounds(p, NO_MATTER))) {
-      printf("address = %p\n", p);
-      exit(8);
-    }
-  }
-}
-
 void mm_check()
 {
   check_implicit_heap();
@@ -428,37 +395,35 @@ void mm_check()
 /* mm_init - initialize the malloc package. */
 int mm_init(void)
 {
-  const size_t nb_pages = 1;
   size_t mps = mem_pagesize();
 
-  if (mem_heapsize() == 0) {
-    if (mem_sbrk(nb_pages*mps) == NULL) {
-      printf("sbrk cannot adjust heap, initialization failed\n");
-      exit(8);
-    }
+  if (mem_sbrk(mps + SIZE_T_SIZE) == NULL) {
+    printf("sbrk cannot adjust heap during initialization\n");
+    exit(8);
   }
   void* lo_heap = mem_heap_lo();
   void* hi_heap = OFFSET(mem_heap_hi(), -SIZE_T_SIZE + 1);
 
   nb_components = 3;
-  size_t offset_sizes = (nb_components-1) * sizeof(size_t);
-  size_t offset_comps = nb_components * sizeof(void*);
+  size_t offset_block_sz = (nb_components-1) * SIZE_T_SIZE;
+  size_t offset_comps = nb_components * PTR_T_SIZE;
   
-  sizes = (size_t*)lo_heap;
-  linked_components = (void**)OFFSET(lo_heap, offset_sizes);
-    for (size_t i = 0; i < nb_components - 1; ++i) {
-    sizes[i] = (2 + i)*mps/2;
+  min_block_sizes = (size_t*)lo_heap;
+  linked_components = (void**)OFFSET(lo_heap, offset_block_sz);
+  for (size_t i = 0; i < nb_components - 1; ++i) {
+    min_block_sizes[i] = mps + (i - nb_components/2)*mps/4;
     linked_components[i] = NULL;
   }
   linked_components[nb_components-1] = NULL;
 
-  size_t offset = ALIGN(offset_sizes + offset_comps); 
+  size_t offset = offset_block_sz + offset_comps;
+  offset = ALIGN(offset + SIZE_T_SIZE) - SIZE_T_SIZE;
+
   blocks = OFFSET(lo_heap, offset);
   *(size_t*)blocks  = mem_heapsize() - offset;
   *(size_t*)hi_heap = mem_heapsize() - offset;
 
   add_to_queue(blocks);
-  search_policy = BEST_FIT;
 
   return 0;
 }
@@ -469,20 +434,20 @@ int mm_init(void)
  */
 void* mm_malloc(size_t size)
 {
-  size_t new_size;
+  size_t newsize;
   void* p;
 
-  new_size = (size > 2*PTR_T_SIZE) ? size : 2*PTR_T_SIZE;
-  new_size = ALIGN(new_size + 2*SIZE_T_SIZE);
-  p = find_block(new_size);
+  newsize = (size > 2*PTR_T_SIZE) ? size : 2*PTR_T_SIZE;
+  newsize = ALIGN(newsize) + 2*SIZE_T_SIZE;
+  p = find_block(newsize);
   
   if (p == NULL) {
-    p = adjust_heap(new_size);
+    p = adjust_heap(newsize);
+  } else {
+    delete_from_queue(p); 
   }
  
-  delete_from_queue(p);
-  occupy_block(p, new_size);
-  
+  occupy_block(p, newsize);  
   return OFFSET(p, SIZE_T_SIZE);
 }
 
@@ -492,13 +457,12 @@ void* mm_malloc(size_t size)
 void mm_free(void *p)
 {
   void* bbeg = OFFSET(p, -SIZE_T_SIZE);
-
-  if ((*(size_t*)bbeg & 1) == 0) {
+  if ((*(size_t*)bbeg & 1) == FREE) {
     printf("double free or corruption\n");
     exit(8);
   }
-    
-  free_block(&bbeg); 
+  free_block(&bbeg);
+  add_to_queue(bbeg);
 }
 
 /*
@@ -511,7 +475,7 @@ void* mm_realloc(void *ptr, size_t size)
     size_t* bbeg = (size_t*)OFFSET(ptr, -SIZE_T_SIZE);
     size_t oldsize = *bbeg & -2;
     size_t newsize = (size > 2*PTR_T_SIZE) ? size : 2*PTR_T_SIZE;
-    newsize = ALIGN(newsize + 2*SIZE_T_SIZE);
+    newsize = ALIGN(newsize) + 2*SIZE_T_SIZE;
 
     void* resid_beg = OFFSET(bbeg, oldsize);
     size_t adjusted = 0;
@@ -522,34 +486,15 @@ void* mm_realloc(void *ptr, size_t size)
 
     if (oldsize + adjusted >= newsize) {
 
-      oldsize += adjusted;
       if (adjusted > 0) {
         delete_from_queue(resid_beg);
       }
-
-      size_t pload_threshold = 2*SIZE_T_SIZE;
-      pload_threshold += (SIZE_T_SIZE > 2*PTR_T_SIZE) ?
-        SIZE_T_SIZE : 2*PTR_T_SIZE;
-
-      if (oldsize - newsize < pload_threshold) {
-        newsize = oldsize;
-      }
-
-      size_t* bend = (size_t*)OFFSET(bbeg, newsize - SIZE_T_SIZE);
-      *bbeg = newsize | 1;
-      *bend = newsize | 1;
-
-      if (oldsize - newsize >= pload_threshold) {
-        size_t resid_len = oldsize - newsize;
-        size_t* resid_beg = (size_t*)OFFSET(bbeg, newsize);
-        size_t* resid_end = (size_t*)OFFSET(bbeg, oldsize - SIZE_T_SIZE);
-        *resid_beg = resid_len;
-        *resid_end = resid_len;
-        add_to_queue((void*)resid_beg);
-      }
+      *bbeg = oldsize + adjusted;
+      occupy_block((void*)bbeg, newsize);
       return ptr;
 
     } else {
+
       void* newptr = mm_malloc(size);
       if (size < oldsize) {
         oldsize = size;
@@ -559,30 +504,9 @@ void* mm_realloc(void *ptr, size_t size)
       return newptr;
     }
   }
-
   if (ptr == NULL)
     return mm_malloc(size);
-
   if (size == 0)
     mm_free(ptr);
-
   return NULL;
-
- /*
-  void *oldptr = ptr;
-  void *newptr;
-  size_t copy_size;
-    
-  newptr = mm_malloc(size);
-  if (newptr == NULL)
-    return NULL;
-
-  copy_size = *(size_t*)OFFSET(oldptr, -SIZE_T_SIZE);
-  if (size < copy_size)
-    copy_size = size;
-
-  memcpy(newptr, oldptr, copy_size);
-  mm_free(oldptr);
-  
-  return newptr;*/
 }
