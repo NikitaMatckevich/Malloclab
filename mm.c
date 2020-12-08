@@ -1,14 +1,22 @@
-/*
- * mm-naive.c - The fastest, least memory-efficient malloc package.
- * 
- * In this naive approach, a block is allocated by simply incrementing
- * the brk pointer.  A block is pure payload. There are no headers or
- * footers.  Blocks are never coalesced or reused. Realloc is
- * implemented directly using mm_malloc and mm_free.
- *
- * NOTE TO STUDENTS: Replace this header comment with your own header
- * comment that gives a high level description of your solution.
- */
+// mm.c
+
+// Heap implemented as anexplicit segregated list. Number of size categories to
+// consider is defined at runtime and can be arbitrary, except that the
+// pointers to the first elements of free lists and the size category info
+// should fit to one sbrk page.
+
+// Search policy used is "best fit", i.e. the complexity is linear in number of
+// free lists in given size category.
+
+// As size_t and void* have size 4 bytes for 32-bit system, we can store 2 size
+// values per 8-byte word and 2 ptr values per 8-byte word. This improves
+// fragmentation on 2%.
+
+// Function realloc is implemented in a way that it doesn't relocate the block
+// if the old block space is already sufficient to use it. It checks the next
+// block after old block, and if it is free, occupies it. If newsize is not
+// large enough to occupy the entire free block, it frees the rest again.
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -18,10 +26,6 @@
 #include "mm.h"
 #include "memlib.h"
 
-/*********************************************************
- * NOTE TO STUDENTS: Before you do anything else, please
- * provide your team information in the following struct.
- ********************************************************/
 team_t team = {
     /* Team name */
     "ateam",
@@ -35,31 +39,44 @@ team_t team = {
     ""
 };
 
-/* single word (4) or double word (8) alignment */
+// single word (4) or double word (8) alignment
 #define ALIGNMENT 8
-/* rounds up to the nearest multiple of ALIGNMENT */
+// rounds up to the nearest multiple of ALIGNMENT
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
 
+// we don't align these values in order to store them in efficient way
 #define SIZE_T_SIZE  (sizeof(size_t))
 #define PTR_T_SIZE   (sizeof(void*))
 
-// block types
+// Possible block categories are "FREE" and "OCCUPIED". However, we never
+// compare the block category with "OCCUPIED", so we don't need it
 #define FREE 0
-#define OCCUPIED 1
+// If we don't need to check the category, we use "NO_MATTER". This is used
+// only for mm_check
 #define NO_MATTER 2
 
 // returns the address that lies in len bytes before or after ptr
 #define OFFSET(ptr, len) (void*)((char*)(ptr) + (len))
 
+// Number of different size categories and the boundary size values.
+// Example: if nb_components = 2, then all blocks
+// have the size <= min_block_sizes[0] or > min_block_sizes[0]
 size_t  nb_components;
 size_t* min_block_sizes;
+
+// array of the first blocks of given category, size of this array is equal to
+// nb_components
 void**  linked_components;
+
+// first effective address of the heap is not equal to the mem_heap_lo(),
+// because previously described dynamic arrays are also stored in the heap
 void*   blocks;
 
+// heap consistency checker
 void mm_check(void);
 
-// delete element from free block queue, p is a pointer to the very beginning
-// of the block
+// deletes element from free block queue, p is a pointer to the very beginning
+// of the block (to size region)
 static void delete_from_queue(void* p) {
 
   void** to_prev = (void**)OFFSET(p, SIZE_T_SIZE);
@@ -84,7 +101,9 @@ static void delete_from_queue(void* p) {
   }
 }
 
-// add element to the queue, p is a pointer to the very beginning of the block
+// adds element to the queue, p is a pointer to the very beginning of the
+// block. The adding strategy is LIFO (simply push new block in front of the
+// list)
 static void add_to_queue(void* p) {
 
   size_t len = *(size_t*)p;
@@ -107,8 +126,11 @@ static void add_to_queue(void* p) {
   }
 }
 
-// finder for explicit lists
-// len = 2*SIZE_T_SIZE + max(size of payload, 2*PTR_T_SIZE)
+// Finder for explicit lists
+// len = 2*SIZE_T_SIZE + max(size of payload, 2*PTR_T_SIZE).
+// Search policy is "BEST_FIT". On each step it checks that the found block
+// size is equal to len (it means that it is no more possible to find better
+// free block)
 static void* find_block(size_t len)
 {
   void* res = NULL;
@@ -141,7 +163,9 @@ static void* find_block(size_t len)
   return res;
 }
 
-// free block pointed by *p, change the *p value in case of coalescing
+// Frees block pointed by *p, do the constant-time coalescing with previous and
+// next blocks, if needed. Changes the *p value in case of coalescing with a
+// previous block. 
 static void free_block(void** p) {
 
   size_t* bbeg = (size_t*)(*p);
@@ -176,7 +200,8 @@ static void free_block(void** p) {
   *p = (void*)bbeg;
 }
 
-// occupy the block in the heap, called by malloc
+// Occupies the block in the heap pointed by p (pointer to the very beginning,
+// i.e. size region). Called only by malloc
 static void occupy_block(void* p, size_t len) {
      
   size_t pload_threshold = 2*(SIZE_T_SIZE + PTR_T_SIZE);
@@ -202,7 +227,8 @@ static void occupy_block(void* p, size_t len) {
   }
 }
 
-// adjust heap size if needed
+// Adjusts heap size if needed. If the last block in the heap is free, adjusts
+// only the missing part of size.
 static void* adjust_heap(size_t size)
 {
   size_t adjust_size = size;
@@ -229,7 +255,7 @@ static void* adjust_heap(size_t size)
   return adjust;
 }
 
-// print LIFO queues of free blocks
+// Prints LIFO queues of all free blocks in forward and backward order
 static void print_linked_components(void) {
   for (size_t i = 0; i < nb_components; ++i) {
     void* curr;
@@ -258,6 +284,7 @@ static void print_linked_components(void) {
   }
 }
 
+// Checks the size region of blocks and coalescing problems
 static int check_bounds(void* p, int status)
 {
   size_t* bbeg = (size_t*)p;
@@ -291,6 +318,7 @@ static int check_bounds(void* p, int status)
   return 1;
 }
 
+// Simply checks that all used adresses are in the heap range
 static int check_valid_address(void* p)
 {
   if ((p < blocks) || (p > mem_heap_hi())) {
@@ -302,6 +330,7 @@ static int check_valid_address(void* p)
   return 1;
 }
 
+// Checks that each block is in the right size category
 static int check_block_size(size_t i, size_t len) {
   if ((i != nb_components-1 && len > min_block_sizes[i]) ||
       (i != 0 && len < min_block_sizes[i-1])) {
@@ -317,6 +346,7 @@ static int check_block_size(size_t i, size_t len) {
   return 1;
 }
 
+// Checks everything for free lists iterating in forward direction
 static void* forward_iterations(void* s, size_t i) {
   void* prev = NULL;
 
@@ -339,6 +369,7 @@ static void* forward_iterations(void* s, size_t i) {
   return prev;
 }
 
+// Does the same as forward_iterations in backward direction
 static void* backward_iterations(void* s) {
   void* next = NULL;
   for (void* curr = s; curr != NULL; curr = *(void**)curr) {
@@ -358,6 +389,8 @@ static void* backward_iterations(void* s) {
   return next;
 }
 
+// Simple base checker that works even for implicit heap models without
+// pointers to prev and next
 static void check_implicit_heap(void)
 {
   for (void* p = blocks; p < mem_heap_hi(); p = OFFSET(p, (*(size_t*)p & -2)))
@@ -369,6 +402,7 @@ static void check_implicit_heap(void)
   }
 }
 
+// Checks explicit free lists
 static int check_free_lists(void)
 { 
   for (size_t i = 0; i < nb_components; ++i) {
@@ -392,7 +426,13 @@ void mm_check()
   check_free_lists();
 }
 
-/* mm_init - initialize the malloc package. */
+// mm_init - initialize the malloc package.
+// Initially allocates 1 page of data, stores all internal values needed for
+// implementation in the beginning of the heap region, and then treats the rest
+// of the page as the first free block in the heap. For correct alignment first
+// allocation should be aligned to 4 bytes and not aligned to 8 bytes, so we
+// add 4 bytes to the size of the page. It is done in order to place ending
+// size region of the last block in the correct address
 int mm_init(void)
 {
   size_t mps = mem_pagesize();
@@ -428,10 +468,11 @@ int mm_init(void)
   return 0;
 }
 
-/* 
- * mm_malloc - Allocate a block by incrementing the brk pointer.
- *     Always allocate a block whose size is a multiple of the alignment.
- */
+// mm_malloc - Allocate a block by incrementing the brk pointer.
+// Always allocates a block whose size is a multiple of the alignment.
+// If heap should be adjusted to allocate new block, doesn't change the
+// explicit free lists at all. Otherwise, deletes one free block from queue,
+// marks it as occupied and returns pointer to its payload region
 void* mm_malloc(size_t size)
 {
   size_t newsize;
@@ -451,9 +492,9 @@ void* mm_malloc(size_t size)
   return OFFSET(p, SIZE_T_SIZE);
 }
 
-/*
- * mm_free - Freeing a block does nothing.
- */
+// mm_free - Freeing a block is marking it as free, checking coalescing and
+// adding it to the explicit free list. Coalescing is done first in order to
+// choose the right size category
 void mm_free(void *p)
 {
   void* bbeg = OFFSET(p, -SIZE_T_SIZE);
@@ -465,9 +506,11 @@ void mm_free(void *p)
   add_to_queue(bbeg);
 }
 
-/*
- * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
- */
+// mm_realloc - if the old memory region (with the next block if it is free)
+// is large enought to store size bytes of data, returns the old ptr, but at
+// first changes size regions of the block pointed by ptr, and eventually next
+// block after it. It the region is smaller than needed, simply calls malloc
+// and frees the old region
 void* mm_realloc(void *ptr, size_t size)
 {
   if ((ptr != NULL) && (size > 0)) {
