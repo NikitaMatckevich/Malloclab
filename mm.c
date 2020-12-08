@@ -507,10 +507,10 @@ void mm_free(void *p)
 }
 
 // mm_realloc - if the old memory region (with the next block if it is free)
-// is large enought to store size bytes of data, returns the old ptr, but at
+// is large enough to store "size" bytes of data, returns the old ptr, but at
 // first changes size regions of the block pointed by ptr, and eventually next
-// block after it. It the region is smaller than needed, simply calls malloc
-// and frees the old region
+// block after it. It the region is smaller than needed, simply calls malloc +
+// memcpy and frees the old memory region
 void* mm_realloc(void *ptr, size_t size)
 {
   if ((ptr != NULL) && (size > 0)) {
